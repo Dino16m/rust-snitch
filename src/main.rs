@@ -1,25 +1,35 @@
 mod comm;
+mod db;
+mod repository;
 mod scheduler;
+mod server;
+mod service;
 
+use paris::info;
+use rocket::launch;
+use scheduler::{Job, JobId, Scheduler};
+use service::JobService;
+use std::env;
 use std::thread;
 
-use chrono::{DateTime, Utc};
-use scheduler::{Job, JobId, Scheduler};
+use crate::server::build_server;
 
-fn snitch(job_id: JobId, expected_run: DateTime<Utc>) {
-    println!("Job {} should have run at {}", job_id, expected_run);
-}
-
-fn main() {
+#[launch]
+fn application() -> _ {
+    let database_url = env::var("DATABASE_URL").unwrap();
+    let (cpool, schema) = db::create(&database_url);
+    info!("Connected to database");
+    let repository = repository::JobRepository::new(schema, cpool);
     let (sender_service, receiver_service) = comm::create_comm_channels();
-    let my_scheduler = Scheduler::new(snitch, vec![], receiver_service);
+    let jobs = repository.list_jobs().unwrap();
+    let scheduler = Scheduler::new(JobService::new(repository.clone()), jobs, receiver_service);
 
-    let scheduler_thread = thread::spawn(move || {
-        let mut my_scheduler = my_scheduler;
+    let _scheduler_thread = thread::spawn(move || {
+        let mut my_scheduler = scheduler;
         my_scheduler.start();
     });
 
-    let job = Job::new(JobId::new_v4(), "*/5 * * * * * *", 10).unwrap();
-    sender_service.add_job(job).unwrap();
-    scheduler_thread.join().unwrap()
+    let rocket_server = build_server(repository, sender_service);
+
+    rocket_server
 }
