@@ -2,11 +2,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use rocket::time::Date;
+use paris::info;
 
 use crate::scheduler::{Job, JobId};
 
-pub type PunctualityChecker = Receiver<(JobId, Sender<Option<bool>>)>;
+pub type PunctualityChecker = Receiver<(JobId, Sender<Option<(bool, Option<DateTime<Utc>>)>>)>;
 pub type JobReceiver = Receiver<Job>;
 pub type CheckInReceiver = Receiver<(JobId, DateTime<Utc>)>;
 
@@ -22,7 +22,7 @@ pub struct ReceiverService {
 
 #[derive(Clone)]
 pub struct SenderService {
-    punctuality_tx: Sender<(JobId, Sender<Option<bool>>)>,
+    punctuality_tx: Sender<(JobId, Sender<Option<(bool, Option<DateTime<Utc>>)>>)>,
     check_in_sender: Sender<(JobId, DateTime<Utc>)>,
     job_sender: Sender<Job>,
     removal_sender: Sender<JobId>,
@@ -30,7 +30,7 @@ pub struct SenderService {
 
 impl SenderService {
     pub fn new(
-        punctuality_tx: Sender<(JobId, Sender<Option<bool>>)>,
+        punctuality_tx: Sender<(JobId, Sender<Option<(bool, Option<DateTime<Utc>>)>>)>,
         check_in_sender: Sender<(JobId, DateTime<Utc>)>,
         job_sender: Sender<Job>,
         removal_sender: Sender<JobId>,
@@ -43,8 +43,8 @@ impl SenderService {
         }
     }
 
-    pub fn is_punctual(&self, id: JobId) -> Option<bool> {
-        let (tx, rx) = mpsc::channel::<Option<bool>>();
+    pub fn is_punctual(&self, id: JobId) -> Option<(bool, Option<DateTime<Utc>>)> {
+        let (tx, rx) = mpsc::channel::<Option<(bool, Option<DateTime<Utc>>)>>();
         if self.punctuality_tx.send((id, tx)).is_err() {
             return None;
         }
@@ -77,7 +77,8 @@ impl SenderService {
 }
 
 pub fn create_comm_channels() -> (SenderService, ReceiverService) {
-    let (punctuality_tx, punctuality_rx) = mpsc::channel::<(JobId, Sender<Option<bool>>)>();
+    let (punctuality_tx, punctuality_rx) =
+        mpsc::channel::<(JobId, Sender<Option<(bool, Option<DateTime<Utc>>)>>)>();
     let (checkin_tx, checkin_rx) = mpsc::channel::<(JobId, DateTime<Utc>)>();
     let (job_tx, job_rx) = mpsc::channel::<Job>();
     let (removal_tx, removal_rx) = mpsc::channel::<JobId>();
@@ -88,6 +89,46 @@ pub fn create_comm_channels() -> (SenderService, ReceiverService) {
             checkin_rx,
             job_rx,
             removal_rx,
+        },
+    )
+}
+
+pub struct WorkerReceiver {
+    pub update_rx: Receiver<Job>,
+    pub snitch_rx: Receiver<(JobId, DateTime<Utc>)>,
+}
+
+pub struct WorkerSender {
+    update_tx: Sender<Job>,
+    snitch_tx: Sender<(JobId, DateTime<Utc>)>,
+}
+
+impl WorkerSender {
+    pub fn snitch(&self, job_id: uuid::Uuid, expected_run: chrono::DateTime<chrono::Utc>) {
+        if self.snitch_tx.send((job_id, expected_run)).is_err() {
+            info!("Could send snitch message for job: {}", job_id);
+        }
+    }
+
+    pub fn update_job(&self, job: Job) {
+        let job_id = job.id().clone();
+        if self.update_tx.send(job).is_err() {
+            info!("Could not send update for job: {}", job_id);
+        }
+    }
+}
+
+pub fn create_worker_channels() -> (WorkerSender, WorkerReceiver) {
+    let (update_tx, update_rx) = mpsc::channel::<Job>();
+    let (snitch_tx, snitch_rx) = mpsc::channel::<(JobId, DateTime<Utc>)>();
+    (
+        WorkerSender {
+            update_tx,
+            snitch_tx,
+        },
+        WorkerReceiver {
+            update_rx,
+            snitch_rx,
         },
     )
 }

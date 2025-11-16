@@ -6,7 +6,6 @@ use microrm::ConnectionPool;
 use microrm::prelude::*;
 
 use crate::db::JobModel;
-use crate::db::JobModelID;
 use crate::{
     db::AppDatabase,
     scheduler::{Job, JobId},
@@ -48,6 +47,7 @@ fn from_model(model: &JobModel) -> Option<Job> {
         id,
         &model.interval,
         model.leeway_seconds as u64,
+        &model.job_name,
         last_run,
         last_expected_run,
     )
@@ -109,6 +109,18 @@ impl JobRepository {
         }
     }
 
+    pub fn get_model(&self, id: JobId) -> Result<Option<JobModel>, DatabaseError> {
+        let mut txn = self.conn.start()?;
+        let model = self.schema.jobs.keyed(id.to_string()).get(&mut txn);
+        match model {
+            Ok(model) => match model {
+                Some(model) => Ok(Some(model.wrapped())),
+                None => return Ok(None),
+            },
+            Err(_) => return Err(DatabaseError),
+        }
+    }
+
     pub fn update(&self, job: &Job) -> Result<(), DatabaseError> {
         let mut txn = self.conn.start()?;
         let model = self
@@ -119,8 +131,14 @@ impl JobRepository {
             .get(&mut txn)?;
         match model {
             Some(mut m) => {
-                m.last_expected_run = Some(job.last_expected_run().to_rfc3339());
-                m.last_run = Some(job.last_run().to_rfc3339());
+                m.last_expected_run = match job.get_last_expected_run() {
+                    Some(time) => Some(time.to_rfc3339()),
+                    None => None,
+                };
+                m.last_run = match job.get_last_run() {
+                    Some(time) => Some(time.to_rfc3339()),
+                    None => None,
+                };
                 m.sync(&mut txn)?;
             }
             None => todo!(),

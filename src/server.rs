@@ -24,9 +24,17 @@ pub struct JobRequest {
 }
 
 #[derive(Serialize)]
-pub struct JobResponse {
+pub struct JobCreationResponse {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Serialize)]
+pub struct JobDetailResponse {
+    pub id: String,
+    pub name: String,
+    pub punctual: Option<bool>,
+    pub last_check_in: Option<String>,
 }
 
 #[post("/jobs", data = "<request>")]
@@ -34,7 +42,7 @@ pub fn create_job(
     request: Json<JobRequest>,
     repository: &State<JobRepository>,
     sender: &State<SenderService>,
-) -> Result<Json<JobResponse>, BadRequest<String>> {
+) -> Result<Json<JobCreationResponse>, BadRequest<String>> {
     let name = match &request.name {
         Some(name) => name.clone(),
         None => {
@@ -46,6 +54,7 @@ pub fn create_job(
             name.clone()
         }
     };
+
     let job = repository.add_job(&JobDTO {
         interval: request.schedule.clone(),
         leeway_seconds: request.leeway_seconds,
@@ -57,25 +66,63 @@ pub fn create_job(
     }
     let job_id = job.as_ref().unwrap().id();
     match sender.add_job(job.unwrap()) {
-        Ok(_) => Ok(Json(JobResponse {
+        Ok(_) => Ok(Json(JobCreationResponse {
             id: job_id.to_string(),
             name: name.clone(),
         })),
-        Err(_) => Err(BadRequest("Could not create job".to_string())),
+        Err(_) => Err(BadRequest("Could not add job".to_string())),
     }
 }
 
 #[post("/jobs/<id>")]
-pub fn check_in(id: String, sender: &State<SenderService>) -> Status {
-    match sender.check_in(id.parse().unwrap(), Utc::now()) {
+pub fn check_in(id: &str, sender: &State<SenderService>) -> Status {
+    let job_id = uuid::Uuid::try_from(id);
+    if job_id.is_err() {
+        return Status::BadRequest;
+    }
+    let job_id = job_id.unwrap();
+    match sender.check_in(job_id, Utc::now()) {
         Ok(_) => Status::NoContent,
         Err(_) => Status::InternalServerError,
     }
 }
 
+#[delete("/job/<id>")]
+pub fn get_job(
+    id: &str,
+    repository: &State<JobRepository>,
+    sender: &State<SenderService>,
+) -> Result<Json<JobDetailResponse>, Status> {
+    let job_id = uuid::Uuid::try_from(id);
+    if job_id.is_err() {
+        return Err(Status::BadRequest);
+    }
+    let job_id = job_id.unwrap();
+    let job = match repository.find_job(job_id) {
+        Ok(job) => match job {
+            Some(job) => job,
+            None => return Err(Status::NotFound),
+        },
+        Err(_) => return Err(Status::InternalServerError),
+    };
+    let (punctual, last_run) = match sender.is_punctual(job_id) {
+        Some(data) => data,
+        None => return Err(Status::InternalServerError),
+    };
+    Ok(Json(JobDetailResponse {
+        id: job.id().to_string(),
+        name: job.get_name(),
+        punctual: Some(punctual),
+        last_check_in: match last_run {
+            Some(last_run) => Some(last_run.to_rfc3339()),
+            None => None,
+        },
+    }))
+}
+
 #[delete("/remove/<id>")]
 pub fn remove_job(
-    id: String,
+    id: &str,
     repository: &State<JobRepository>,
     sender: &State<SenderService>,
 ) -> Status {
@@ -97,5 +144,5 @@ pub fn build_server(repository: JobRepository, sender: SenderService) -> Rocket<
     rocket::build()
         .manage(repository)
         .manage(sender)
-        .mount("/", routes![check_in, create_job, remove_job])
+        .mount("/", routes![check_in, create_job, remove_job, get_job])
 }

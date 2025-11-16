@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use core::time;
 use cron::Schedule;
 use paris::info;
 use std::{
@@ -10,13 +9,14 @@ use std::{
 };
 use uuid::Uuid;
 
-use crate::{comm::ReceiverService, service::JobService};
+use crate::comm::{ReceiverService, WorkerSender};
 
 pub type JobId = Uuid;
 
 #[derive(Debug, Clone)]
 pub struct Job {
     id: JobId,
+    name: String,
     schedule: Schedule,
     last_run: Option<DateTime<Utc>>,
     last_expected_run: Option<DateTime<Utc>>,
@@ -29,6 +29,7 @@ impl Job {
         id: JobId,
         interval: &str,
         leeway_seconds: u64,
+        name: &str,
         last_run: Option<DateTime<Utc>>,
         last_expected_run: Option<DateTime<Utc>>,
     ) -> Option<Job> {
@@ -36,6 +37,7 @@ impl Job {
         match schedule {
             Ok(schedule) => Some(Job {
                 id,
+                name: name.to_owned(),
                 next_run: schedule.upcoming(Utc).next().unwrap(),
                 schedule,
                 last_run,
@@ -53,12 +55,16 @@ impl Job {
         self.id
     }
 
-    pub fn last_run(&self) -> DateTime<Utc> {
-        self.last_run()
+    pub fn get_name(&self) -> String {
+        self.name.clone()
     }
 
-    pub fn last_expected_run(&self) -> DateTime<Utc> {
-        self.last_expected_run()
+    pub fn get_last_run(&self) -> Option<DateTime<Utc>> {
+        self.last_run
+    }
+
+    pub fn get_last_expected_run(&self) -> Option<DateTime<Utc>> {
+        self.last_expected_run
     }
 
     fn tick(&mut self, now: DateTime<Utc>) -> bool {
@@ -91,21 +97,21 @@ impl Job {
 
 pub struct Scheduler {
     jobs: HashMap<JobId, Job>,
-    job_service: JobService,
+    worker_sender: WorkerSender,
     update_queue: HashMap<JobId, Job>,
     receiver_service: ReceiverService,
 }
 
 impl Scheduler {
     pub fn new(
-        job_service: JobService,
+        worker_sender: WorkerSender,
         jobs: Vec<Job>,
         receiver_service: ReceiverService,
     ) -> Scheduler {
         let jobs = HashMap::from_iter(jobs.into_iter().map(|j| (j.id(), j)));
         Scheduler {
             jobs,
-            job_service,
+            worker_sender,
             receiver_service,
             update_queue: HashMap::new(),
         }
@@ -133,9 +139,9 @@ impl Scheduler {
         }
     }
 
-    pub fn is_punctual(&self, id: JobId) -> Option<bool> {
+    pub fn is_punctual(&self, id: JobId) -> Option<(bool, Option<DateTime<Utc>>)> {
         if let Some(job) = self.jobs.get(&id) {
-            Some(job.is_punctual())
+            Some((job.is_punctual(), job.last_run))
         } else {
             None
         }
@@ -145,7 +151,8 @@ impl Scheduler {
         for (id, job) in &self.jobs {
             info!("Snitching job: {}", id);
             if !job.is_punctual() {
-                self.job_service.snitch(*id, job.last_expected_run.unwrap());
+                self.worker_sender
+                    .snitch(*id, job.last_expected_run.unwrap());
             }
         }
     }
@@ -154,7 +161,7 @@ impl Scheduler {
         let keys: Vec<JobId> = self.update_queue.keys().cloned().collect();
         for key in keys.into_iter() {
             if let Some(job) = self.update_queue.remove(&key) {
-                self.job_service.update_job(job);
+                self.worker_sender.update_job(job);
             }
         }
     }
@@ -176,13 +183,16 @@ impl Scheduler {
     }
 
     fn receive_checkin(&mut self) {
+        let timer = Instant::now();
         loop {
             let received = self
                 .receiver_service
                 .checkin_rx
-                .recv_timeout(Duration::from_millis(10));
+                .recv_timeout(Duration::from_millis(2));
             match received {
-                Ok((id, time)) => self.check_in(id, time),
+                Ok((id, time)) => {
+                    self.check_in(id, time);
+                }
                 Err(_) => break,
             }
         }
@@ -221,9 +231,9 @@ impl Scheduler {
     }
 
     pub fn start(&mut self) {
-        let sleep_duration = Duration::from_millis(5);
-        let snitch_interval = Duration::from_secs(10);
-        let update_interval = Duration::from_secs(10);
+        let sleep_duration = Duration::from_millis(20);
+        let snitch_interval = Duration::from_mins(10);
+        let update_interval = Duration::from_mins(10);
         info!("Starting scheduler with {} jobs", self.jobs.len());
 
         let mut timer = Instant::now();
@@ -259,7 +269,7 @@ mod tests {
     use chrono::Duration;
 
     fn create_test_job() -> Job {
-        Job::new(Uuid::new_v4(), "*/5 * * * * * *", 10, None, None).unwrap()
+        Job::new(Uuid::new_v4(), "*/5 * * * * * *", 10, "test", None, None).unwrap()
     }
 
     #[test]
