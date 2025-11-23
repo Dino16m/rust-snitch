@@ -183,7 +183,6 @@ impl Scheduler {
     }
 
     fn receive_checkin(&mut self) {
-        let timer = Instant::now();
         loop {
             let received = self
                 .receiver_service

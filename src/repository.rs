@@ -141,7 +141,7 @@ impl JobRepository {
                 };
                 m.sync(&mut txn)?;
             }
-            None => todo!(),
+            None => return Err(DatabaseError),
         }
         txn.commit()?;
         return Ok(());

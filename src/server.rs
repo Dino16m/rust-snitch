@@ -2,6 +2,7 @@ use chrono::Utc;
 use fake::Fake;
 use fake::faker::lorem::raw::Word;
 use fake::locales::EN;
+use rocket::get;
 use rocket::response::status::BadRequest;
 use rocket::{
     Build, Rocket, State, delete,
@@ -87,7 +88,7 @@ pub fn check_in(id: &str, sender: &State<SenderService>) -> Status {
     }
 }
 
-#[delete("/job/<id>")]
+#[get("/job/<id>")]
 pub fn get_job(
     id: &str,
     repository: &State<JobRepository>,
@@ -141,8 +142,8 @@ pub fn remove_job(
 }
 
 pub fn build_server(repository: JobRepository, sender: SenderService) -> Rocket<Build> {
-    rocket::build()
-        .manage(repository)
-        .manage(sender)
-        .mount("/", routes![check_in, create_job, remove_job, get_job])
+    rocket::build().manage(repository).manage(sender).mount(
+        "/api/snitch/",
+        routes![check_in, create_job, remove_job, get_job],
+    )
 }

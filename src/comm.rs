@@ -106,7 +106,7 @@ pub struct WorkerSender {
 impl WorkerSender {
     pub fn snitch(&self, job_id: uuid::Uuid, expected_run: chrono::DateTime<chrono::Utc>) {
         if self.snitch_tx.send((job_id, expected_run)).is_err() {
-            info!("Could send snitch message for job: {}", job_id);
+            info!("Could not send snitch message for job: {}", job_id);
         }
     }
 
