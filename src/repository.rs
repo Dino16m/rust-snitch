@@ -33,14 +33,26 @@ pub struct JobRepository {
 }
 
 fn from_model(model: &JobModel) -> Option<Job> {
-    let id = uuid::Uuid::from_str(&model.job_id).unwrap();
+    let Ok(id) = uuid::Uuid::from_str(&model.job_id) else {
+        return None;
+    };
     let last_run = match &model.last_run {
-        Some(last_run) => Some(DateTime::<Utc>::from_str(&last_run).unwrap()),
+        Some(last_run) => {
+            let Ok(last_run) = DateTime::<Utc>::from_str(&last_run) else {
+                return None;
+            };
+            Some(last_run)
+        }
         None => None,
     };
 
     let last_expected_run = match &model.last_expected_run {
-        Some(last_expected_run) => Some(DateTime::<Utc>::from_str(&last_expected_run).unwrap()),
+        Some(last_expected_run) => {
+            let Ok(last_expected_run) = DateTime::<Utc>::from_str(&last_expected_run) else {
+                return None;
+            };
+            Some(last_expected_run)
+        }
         None => None,
     };
     Job::new(
@@ -67,8 +79,7 @@ impl JobRepository {
                 let jobs = models
                     .into_iter()
                     .map(|j| from_model(&j.wrapped()))
-                    .filter(|j| j.is_some())
-                    .map(|j| j.unwrap())
+                    .filter_map(|j| j)
                     .collect::<Vec<_>>();
                 Ok(jobs)
             }
@@ -102,7 +113,8 @@ impl JobRepository {
         let model = self.schema.jobs.keyed(id.to_string()).get(&mut txn);
         match model {
             Ok(model) => {
-                let job = from_model(&model.unwrap());
+                let Some(model) = model else { return Ok(None) };
+                let job = from_model(&model);
                 return Ok(job);
             }
             Err(_) => return Err(DatabaseError),

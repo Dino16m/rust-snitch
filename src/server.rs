@@ -1,7 +1,9 @@
 use chrono::Utc;
 use fake::Fake;
+use fake::faker::impls::job;
 use fake::faker::lorem::raw::Word;
 use fake::locales::EN;
+use fake::rand::rand_core::le;
 use rocket::get;
 use rocket::response::status::BadRequest;
 use rocket::{
@@ -62,11 +64,11 @@ pub fn create_job(
         report_url: request.report_url.clone(),
         name: name.clone(),
     });
-    if job.is_err() {
+    let Ok(job) = job else {
         return Err(BadRequest("Could not create job".to_string()));
-    }
-    let job_id = job.as_ref().unwrap().id();
-    match sender.add_job(job.unwrap()) {
+    };
+    let job_id = job.id();
+    match sender.add_job(job) {
         Ok(_) => Ok(Json(JobCreationResponse {
             id: job_id.to_string(),
             name: name.clone(),
@@ -78,10 +80,9 @@ pub fn create_job(
 #[post("/jobs/<id>")]
 pub fn check_in(id: &str, sender: &State<SenderService>) -> Status {
     let job_id = uuid::Uuid::try_from(id);
-    if job_id.is_err() {
+    let Ok(job_id) = job_id else {
         return Status::BadRequest;
-    }
-    let job_id = job_id.unwrap();
+    };
     match sender.check_in(job_id, Utc::now()) {
         Ok(_) => Status::NoContent,
         Err(_) => Status::InternalServerError,
@@ -95,10 +96,9 @@ pub fn get_job(
     sender: &State<SenderService>,
 ) -> Result<Json<JobDetailResponse>, Status> {
     let job_id = uuid::Uuid::try_from(id);
-    if job_id.is_err() {
+    let Ok(job_id) = job_id else {
         return Err(Status::BadRequest);
-    }
-    let job_id = job_id.unwrap();
+    };
     let job = match repository.find_job(job_id) {
         Ok(job) => match job {
             Some(job) => job,
@@ -128,10 +128,9 @@ pub fn remove_job(
     sender: &State<SenderService>,
 ) -> Status {
     let job_id = uuid::Uuid::try_from(id);
-    if job_id.is_err() {
+    let Ok(job_id) = job_id else {
         return Status::BadRequest;
-    }
-    let job_id = job_id.unwrap();
+    };
     if sender.remove_job(job_id.clone()).is_err() {
         return Status::InternalServerError;
     }

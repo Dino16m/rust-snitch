@@ -34,16 +34,22 @@ impl Job {
         last_expected_run: Option<DateTime<Utc>>,
     ) -> Option<Job> {
         let schedule = Schedule::from_str(interval);
+
         match schedule {
-            Ok(schedule) => Some(Job {
-                id,
-                name: name.to_owned(),
-                next_run: schedule.upcoming(Utc).next().unwrap(),
-                schedule,
-                last_run,
-                last_expected_run,
-                leeway_seconds,
-            }),
+            Ok(schedule) => {
+                let Some(next_run) = schedule.upcoming(Utc).next() else {
+                    return None;
+                };
+                Some(Job {
+                    id,
+                    name: name.to_owned(),
+                    next_run,
+                    schedule,
+                    last_run,
+                    last_expected_run,
+                    leeway_seconds,
+                })
+            }
             Err(e) => {
                 info!("Invalid interval: {}", e);
                 None
@@ -73,7 +79,9 @@ impl Job {
             self.last_expected_run = Some(self.next_run);
             updated = true;
         }
-        self.next_run = self.schedule.after(&now).next().unwrap();
+        if let Some(next_run) = self.schedule.after(&now).next() {
+            self.next_run = next_run;
+        };
 
         return updated;
     }
@@ -83,15 +91,21 @@ impl Job {
         self.tick(now);
     }
 
-    fn is_punctual(&self) -> bool {
-        if self.last_expected_run.is_none() {
+    fn is_punctual(&self, now: Option<DateTime<Utc>>) -> bool {
+        let Some(last_expected_run) = self.last_expected_run else {
             return true;
-        }
-        if self.last_run.is_none() {
+        };
+        let Some(last_run) = self.last_run else {
             return false;
+        };
+        let mut within_leeway = false;
+        if let Some(now) = now {
+            within_leeway =
+                (last_expected_run - now).abs().as_seconds_f32() <= self.leeway_seconds as f32;
         }
-        let diff = self.last_expected_run.unwrap() - self.last_run.unwrap();
-        diff.abs().as_seconds_f32() < self.leeway_seconds as f32
+
+        let diff = last_expected_run - last_run;
+        (diff.abs().as_seconds_f32() < self.leeway_seconds as f32) || within_leeway
     }
 }
 
@@ -141,7 +155,8 @@ impl Scheduler {
 
     pub fn is_punctual(&self, id: JobId) -> Option<(bool, Option<DateTime<Utc>>)> {
         if let Some(job) = self.jobs.get(&id) {
-            Some((job.is_punctual(), job.last_run))
+            let now = Utc::now();
+            Some((job.is_punctual(Some(now)), job.last_run))
         } else {
             None
         }
@@ -150,9 +165,23 @@ impl Scheduler {
     fn run_snitch(&self) {
         for (id, job) in &self.jobs {
             info!("Snitching job: {}", id);
-            if !job.is_punctual() {
-                self.worker_sender
-                    .snitch(*id, job.last_expected_run.unwrap());
+            let now = Utc::now();
+            if !job.is_punctual(Some(now)) {
+                let Some(last_expected_run) = job.last_expected_run else {
+                    info!("Job: {} has no last expected run", id);
+                    continue;
+                };
+                if let Some(last_run) = job.last_run {
+                    info!(
+                        "Job: {} is not punctual: Last expected run {}, last run {}",
+                        id,
+                        last_expected_run.to_rfc3339(),
+                        last_run.to_rfc3339()
+                    );
+                };
+                info!("Job: {} is not punctual", id,);
+
+                self.worker_sender.snitch(*id, last_expected_run);
             }
         }
     }
@@ -231,8 +260,8 @@ impl Scheduler {
 
     pub fn start(&mut self) {
         let sleep_duration = Duration::from_millis(20);
-        let snitch_interval = Duration::from_mins(10);
-        let update_interval = Duration::from_mins(10);
+        let snitch_interval = Duration::from_mins(1);
+        let update_interval = Duration::from_mins(3);
         info!("Starting scheduler with {} jobs", self.jobs.len());
 
         let mut timer = Instant::now();
@@ -274,7 +303,7 @@ mod tests {
     #[test]
     fn should_be_punctual_when_newly_created() {
         let job = create_test_job();
-        assert!(job.is_punctual());
+        assert!(job.is_punctual(None));
     }
 
     #[test]
@@ -282,7 +311,7 @@ mod tests {
         let mut job = create_test_job();
         let now = Utc::now();
         job.tick(now);
-        assert!(!job.is_punctual());
+        assert!(!job.is_punctual(None));
     }
 
     #[test]
@@ -291,7 +320,7 @@ mod tests {
         let expected_time = job.next_run;
         job.tick(expected_time);
         job.run(expected_time);
-        assert!(job.is_punctual());
+        assert!(job.is_punctual(None));
     }
 
     #[test]
@@ -300,8 +329,8 @@ mod tests {
         let expected_time = job.next_run;
         job.tick(expected_time);
         // Run 5 seconds late (within 10 second leeway)
-        job.run(expected_time + Duration::seconds(5));
-        assert!(job.is_punctual());
+        job.run(expected_time + Duration::seconds(14));
+        assert!(job.is_punctual(None));
     }
 
     #[test]
@@ -311,7 +340,7 @@ mod tests {
         job.tick(expected_time);
         // Run 15 seconds late (beyond 10 second leeway)
         job.run(expected_time + Duration::seconds(15));
-        assert!(!job.is_punctual());
+        assert!(!job.is_punctual(None));
     }
 
     #[test]
@@ -322,20 +351,26 @@ mod tests {
         let expected_time = job.next_run;
         job.tick(expected_time);
         job.run(expected_time);
-        assert!(job.is_punctual(), "Should be punctual after on-time run");
+        assert!(
+            job.is_punctual(None),
+            "Should be punctual after on-time run"
+        );
 
         // Second run - slightly late but within leeway
         let expected_time = job.next_run;
         job.tick(expected_time);
         job.run(expected_time + Duration::seconds(5));
-        assert!(job.is_punctual(), "Should be punctual when within leeway");
+        assert!(
+            job.is_punctual(None),
+            "Should be punctual when within leeway"
+        );
 
         // Third run - too late
         let expected_time = job.next_run;
         job.tick(expected_time);
         job.run(expected_time + Duration::seconds(15));
         assert!(
-            !job.is_punctual(),
+            !job.is_punctual(None),
             "Should not be punctual when beyond leeway"
         );
     }

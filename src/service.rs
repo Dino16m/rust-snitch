@@ -30,29 +30,24 @@ impl JobService {
 
     pub fn snitch(&self, job_id: uuid::Uuid, expected_run: chrono::DateTime<chrono::Utc>) {
         let job = self.repository.get_model(job_id);
-        if job.is_err() {
+        let Ok(job) = job else {
             info!("An error occurred when fetching job: {}", job_id);
             return;
-        }
-        let job = job.unwrap();
-        if job.is_none() {
+        };
+        let Some(job) = job else {
             info!("Could not find job: {}", job_id);
             return;
-        }
-        let job = job.unwrap();
-        if job.report_url.is_none() {
+        };
+        let Some(report_url) = job.report_url else {
             info!("Could not find report url for job: {}", job_id);
             return;
-        }
+        };
         let payload = SnitchRequest {
             name: job.job_name,
             id: job.job_id,
             missed_check_in: expected_run.to_rfc3339(),
         };
-        let response = self
-            .client
-            .post(&job.report_url.unwrap())
-            .send_json(&payload);
+        let response = self.client.post(&report_url).send_json(&payload);
         match response {
             Ok(response) => {
                 info!(
