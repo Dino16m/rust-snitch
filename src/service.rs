@@ -1,10 +1,13 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use paris::info;
 use serde::Serialize;
 use ureq::Agent;
 
-use crate::{repository::JobRepository, scheduler::Job};
+use crate::{
+    repository::JobRepository,
+    scheduler::{Job, JobId},
+};
 
 #[derive(Serialize)]
 struct SnitchRequest {
@@ -16,6 +19,7 @@ struct SnitchRequest {
 pub struct JobService {
     repository: JobRepository,
     client: Agent,
+    snitch_record: HashMap<JobId, chrono::DateTime<chrono::Utc>>,
 }
 
 impl JobService {
@@ -25,10 +29,14 @@ impl JobService {
             .build()
             .into();
 
-        JobService { repository, client }
+        JobService {
+            repository,
+            client,
+            snitch_record: HashMap::new(),
+        }
     }
 
-    pub fn snitch(&self, job_id: uuid::Uuid, expected_run: chrono::DateTime<chrono::Utc>) {
+    pub fn snitch(&mut self, job_id: uuid::Uuid, expected_run: chrono::DateTime<chrono::Utc>) {
         let job = self.repository.get_model(job_id);
         let Ok(job) = job else {
             info!("An error occurred when fetching job: {}", job_id);
@@ -37,6 +45,13 @@ impl JobService {
         let Some(job) = job else {
             info!("Could not find job: {}", job_id);
             return;
+        };
+        let record = self.snitch_record.get(&job_id);
+        if let Some(record) = record {
+            if record == &expected_run {
+                info!("Snitch message for job: {} has already been sent", job_id);
+                return;
+            }
         };
         let Some(report_url) = job.report_url else {
             info!("Could not find report url for job: {}", job_id);
@@ -55,6 +70,7 @@ impl JobService {
                     job_id,
                     response.status()
                 );
+                self.snitch_record.insert(job_id, expected_run);
             }
             Err(e) => {
                 info!("Snitch response for job: {} failed: {}", job_id, e);
