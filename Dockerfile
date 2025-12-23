@@ -12,7 +12,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY ./src ./src
 
 # Build release binary
-RUN cargo build --release
+RUN --mount=type=cache,target=/usr/local/cargo/git/db \
+    --mount=type=cache,target=/usr/local/cargo/registry/ \
+    cargo build --release
 
 
 # Final stage: small runtime image
