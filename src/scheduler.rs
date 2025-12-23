@@ -98,6 +98,9 @@ impl Job {
         let Some(last_run) = self.last_run else {
             return false;
         };
+        if last_run > last_expected_run {
+            return true;
+        }
         let mut within_leeway = false;
         if let Some(now) = now {
             within_leeway =
@@ -105,7 +108,8 @@ impl Job {
         }
 
         let diff = last_expected_run - last_run;
-        (diff.abs().as_seconds_f32() < self.leeway_seconds as f32) || within_leeway
+        let ran_recently = diff.abs().as_seconds_f32() < self.leeway_seconds as f32;
+        ran_recently || within_leeway
     }
 }
 
@@ -154,12 +158,11 @@ impl Scheduler {
     }
 
     pub fn is_punctual(&self, id: JobId) -> Option<(bool, Option<DateTime<Utc>>)> {
-        if let Some(job) = self.jobs.get(&id) {
-            let now = Utc::now();
-            Some((job.is_punctual(Some(now)), job.last_run))
-        } else {
-            None
-        }
+        let Some(job) = self.jobs.get(&id) else {
+            return None;
+        };
+        let now = Utc::now();
+        Some((job.is_punctual(Some(now)), job.last_run))
     }
 
     fn run_snitch(&self) {
