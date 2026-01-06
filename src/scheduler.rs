@@ -4,12 +4,13 @@ use paris::info;
 use std::{
     collections::HashMap,
     str::FromStr,
-    thread::sleep,
+    sync::mpsc::Sender,
+    thread::{sleep, spawn},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
 
-use crate::comm::{ReceiverService, WorkerSender};
+use crate::comm::{ReceiverService, SchedulerAction, WorkerSender};
 
 pub type JobId = Uuid;
 
@@ -120,6 +121,43 @@ pub struct Scheduler {
     receiver_service: ReceiverService,
 }
 
+fn run_ticker(
+    sleep_duration: Duration,
+    snitch_interval: Duration,
+    update_interval: Duration,
+    sender: Sender<SchedulerAction>,
+) {
+    let mut timer = Instant::now();
+    let mut next_snitch_run = timer + snitch_interval;
+    let mut next_update_run = timer + update_interval;
+
+    loop {
+        let now = Utc::now();
+        match sender.send(SchedulerAction::Tick(now)) {
+            Ok(_) => {}
+            Err(e) => info!("Could not send tick: {}", e),
+        }
+
+        if timer >= next_snitch_run {
+            match sender.send(SchedulerAction::RunSnitch) {
+                Ok(_) => {}
+                Err(e) => info!("Could not send snitch: {}", e),
+            }
+            next_snitch_run = timer + snitch_interval;
+        }
+        if timer >= next_update_run {
+            match sender.send(SchedulerAction::RunUpdater) {
+                Ok(_) => {}
+                Err(e) => info!("Could not send update: {}", e),
+            }
+            info!("Running updater");
+            next_update_run = timer + update_interval;
+        }
+        sleep(sleep_duration);
+        timer += timer.elapsed();
+    }
+}
+
 impl Scheduler {
     pub fn new(
         worker_sender: WorkerSender,
@@ -198,98 +236,45 @@ impl Scheduler {
         }
     }
 
-    fn check_punctuality(&self) {
-        loop {
-            let received = self
-                .receiver_service
-                .punctuality_rx
-                .recv_timeout(Duration::from_millis(10));
-            match received {
-                Ok((id, sender)) => {
-                    let punctual = self.is_punctual(id);
-                    let _ = sender.send(punctual);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    fn receive_checkin(&mut self) {
-        loop {
-            let received = self
-                .receiver_service
-                .checkin_rx
-                .recv_timeout(Duration::from_millis(2));
-            match received {
-                Ok((id, time)) => {
-                    self.check_in(id, time);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    fn remove_job(&mut self) {
-        loop {
-            let received = self
-                .receiver_service
-                .removal_rx
-                .recv_timeout(Duration::from_millis(10));
-            match received {
-                Ok(job_id) => {
-                    self.jobs.remove(&job_id);
-                    info!("Removed job: {}", job_id);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
-    fn receive_job(&mut self) {
-        loop {
-            let received = self
-                .receiver_service
-                .job_rx
-                .recv_timeout(Duration::from_millis(10));
-            match received {
-                Ok(job) => {
-                    info!("Received job: {}", job.id());
-                    self.add(job);
-                }
-                Err(_) => break,
-            }
-        }
-    }
-
     pub fn start(&mut self) {
         let sleep_duration = Duration::from_millis(20);
         let snitch_interval = Duration::from_mins(1);
         let update_interval = Duration::from_mins(3);
         info!("Starting scheduler with {} jobs", self.jobs.len());
-
-        let mut timer = Instant::now();
-        let mut next_snitch_run = timer + snitch_interval;
-        let mut next_update_run = timer + update_interval;
-
+        let sender = self.receiver_service.action_tx.clone();
+        spawn(move || {
+            run_ticker(sleep_duration, snitch_interval, update_interval, sender);
+        });
         loop {
-            let now = Utc::now();
-            self.tick(now);
-            self.check_punctuality();
-            self.receive_checkin();
-            self.receive_job();
-            self.remove_job();
-            if timer >= next_snitch_run {
-                info!("Running snitch");
-                self.run_snitch();
-                next_snitch_run = timer + snitch_interval;
+            let received = self.receiver_service.action_rx.recv();
+            match received {
+                Ok(action) => match action {
+                    SchedulerAction::CheckIn(id, time) => self.check_in(id, time),
+                    SchedulerAction::RemoveJob(job_id) => {
+                        self.jobs.remove(&job_id);
+                        info!("Removed job: {}", job_id);
+                    }
+                    SchedulerAction::PunctualityCheck(job_id, tx) => {
+                        let punctual = self.is_punctual(job_id);
+                        let _ = tx.send(punctual);
+                    }
+                    SchedulerAction::AddJob(job) => {
+                        self.add(job);
+                    }
+                    SchedulerAction::Tick(date_time) => {
+                        self.tick(date_time);
+                    }
+                    SchedulerAction::RunSnitch => {
+                        info!("Running snitch");
+                        self.run_snitch();
+                    }
+                    SchedulerAction::RunUpdater => {
+                        info!("Running updater");
+                        self.run_updater();
+                    }
+                },
+                Err(_) => break,
             }
-            if timer >= next_update_run {
-                info!("Running updater");
-                self.run_updater();
-                next_update_run = timer + update_interval;
-            }
-            sleep(sleep_duration);
-            timer += timer.elapsed();
         }
     }
 }

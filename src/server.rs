@@ -1,9 +1,7 @@
 use chrono::Utc;
 use fake::Fake;
-use fake::faker::impls::job;
 use fake::faker::lorem::raw::Word;
 use fake::locales::EN;
-use fake::rand::rand_core::le;
 use rocket::get;
 use rocket::response::status::BadRequest;
 use rocket::{
